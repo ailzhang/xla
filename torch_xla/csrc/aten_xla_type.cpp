@@ -101,6 +101,42 @@ void AtenInitialize() {
 
 }  // namespace
 
+namespace compound {
+struct NarrowAutogradFunction
+    : public torch::autograd::Function<NarrowAutogradFunction> {
+  static torch::Tensor forward(torch::autograd::AutogradContext* ctx,
+                               torch::Tensor self, int64_t dim,
+                               torch::Tensor start, int64_t length) {
+    ctx->saved_data["dim"] = dim;
+    ctx->saved_data["length"] = length;
+    ctx->save_for_backward({self, start});
+    XLA_CHECK(start.numel() == 1 &&
+              at::isIntegralType(start.scalar_type(), /*includeBool=*/false))
+        << "start must be 0-dim Long Tensor.";
+    // FIXME: lowering starts here.
+    std::cout << "HELLO" << std::endl;
+    return self;
+  }
+
+  static torch::autograd::variable_list backward(
+      torch::autograd::AutogradContext* ctx,
+      torch::autograd::variable_list grad_output) {
+    int dim = ctx->saved_data["dim"].toInt();
+    int length = ctx->saved_data["length"].toInt();
+    auto saved = ctx->get_saved_variables();
+    auto self = saved[0];
+    auto start = saved[1];
+    // FIXME: lowering starts here.
+    std::cout << "BACKWARD" << std::endl;
+    torch::autograd::variable_list output = {torch::zeros_like(grad_output[0]),
+                                             torch::Tensor(), torch::Tensor(),
+                                             torch::Tensor()};
+    return output;
+  }
+};
+
+}  // namespace compound
+
 at::Tensor& AtenXlaType::__ilshift__(at::Tensor& self, at::Scalar other) {
   XLA_FN_COUNTER("xla::");
   XLATensor self_tensor = bridge::GetXlaTensor(self);
@@ -1912,6 +1948,12 @@ at::Tensor& AtenXlaType::mv_out(at::Tensor& out, const at::Tensor& self,
   XLATensor::mv_out(out_tensor, bridge::GetXlaTensor(self),
                     bridge::GetXlaTensor(vec));
   return out;
+}
+
+at::Tensor AtenXlaType::narrow(const at::Tensor& self, int64_t dim,
+                               const at::Tensor& start, int64_t length) {
+  XLA_FN_COUNTER("xla::");
+  return compound::NarrowAutogradFunction::apply(self, dim, start, length);
 }
 
 at::Tensor AtenXlaType::narrow_copy(const at::Tensor& self, int64_t dim,

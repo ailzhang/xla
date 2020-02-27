@@ -24,11 +24,11 @@ class ArgTemplate(string.Template):
   idpattern = r'[a-z0-9_]+'
 
 
-FuncDef = namedtuple_with_defaults('FuncDef', 'cpp_sig, aten_sig')
+FuncDef = namedtuple_with_defaults('FuncDef', 'cpp_sig, aten_sig, compound')
 
 FuncGen = namedtuple_with_defaults(
     'FuncGen',
-    'tree, xtree, rwxtree, func, xfunc, code, sig, rwsig, cppsig, funsig, mapsig, aten_sig'
+    'tree, xtree, rwxtree, func, xfunc, code, sig, rwsig, cppsig, funsig, mapsig, aten_sig, compound'
 )
 
 FuncOpts = namedtuple_with_defaults(
@@ -80,6 +80,10 @@ _XPARSER = lark.Lark(
     _GRAMMAR, parser='lalr', propagate_positions=True, keep_all_tokens=True)
 
 _FN_BLACKLIST = set([])
+
+_FN_WHITELIST = set([
+    'narrow(Tensor, int64_t, Tensor, int64_t) -> Tensor',
+    ])
 
 _FN_BLACKLIST_REGEX = [
     # ATEN functions
@@ -300,13 +304,15 @@ def list_get(l, n):
   return l[n] if n < len(l) else None
 
 
-def is_blacklisted_fn(fname, mapsig):
+def is_blacklisted_fn(fname, mapsig, compound):
+  if compound and fname not in _FN_WHITELIST and mapsig not in _FN_WHITELIST:
+    return True
   if fname in _FN_BLACKLIST or mapsig in _FN_BLACKLIST:
     return True
   for frx in _FN_BLACKLIST_REGEX:
     if re.match(frx, fname) or re.match(frx, mapsig):
       return True
-  return False
+  return compound or False
 
 
 def get_outfn_options(fname, mapsig):
@@ -830,12 +836,13 @@ def get_xla_wrapper(fndef, ctx):
   rwxtree = _XPARSER.parse(rwsig)
   params = get_parameters(tree)
   fnopts = _FUNCTION_OPTIONS.get(mapsig, None)
+  compound = fndef.compound
 
   def gen_fnname(x):
     return 'AtenXlaTypeDefault::{}'.format(x)
 
   sig, fname, xfname = get_function_signature(rwxtree, rwsig, gen_fnname)
-  if not is_blacklisted_fn(fname, mapsig):
+  if not is_blacklisted_fn(fname, mapsig, compound):
     ofnopts = get_outfn_options(fname, mapsig)
     rfnopts = get_remapfn_options(fname, mapsig)
     if ofnopts is not None:
@@ -874,13 +881,13 @@ def extract_functions(path):
   functions = []
   errors = []
   for line in open(path, 'r'):
-    m = re.match(r'\s*([^\s].*); //\s+(.*)', line)
+    m = re.match(r'\s*([^\s].*); //\s+(.*) // Compound:(\d)', line)
     if not m:
       continue
     fndef = m.group(1)
     try:
       _XPARSER.parse(fndef)
-      functions.append(FuncDef(cpp_sig=fndef, aten_sig=m.group(2)))
+      functions.append(FuncDef(cpp_sig=fndef, aten_sig=m.group(2), compound=m.group(3)=='1'))
     except Exception as e:
       if is_tensor_api(fndef)[0]:
         errors.append((fndef, str(e)))
@@ -928,6 +935,11 @@ def parse_local_overrides(path):
 
 def generate_registrations(fgens, overrides):
   code = 'void RegisterAtenTypeFunctions() {\n'
+  code += (
+      '  // XLAPreAutograd falls through by default.\n  '
+      'static auto registry = c10::Dispatcher::singleton().registerBackendFallbackKernel(\n    '
+      'c10::DispatchKey::XLAPreAutograd,\n    '
+      'c10::KernelFunction::makeFallthrough());\n')
   code += '  static auto dispatch = torch::RegisterOperators()\n'
   overridden = set()
   for fgen in fgens:
@@ -938,12 +950,14 @@ def generate_registrations(fgens, overrides):
     else:
       override_fn = fgen.xfunc if fgen.code else None
     if override_fn:
+      dispatch_key = 'XLATensorId'
+      if fgen.mapsig in _FN_WHITELIST:
+        dispatch_key = 'XLAPreAutograd'
       code += (
           '  .op(torch::RegisterOperators::options().schema("{}")\n      '
-          '.impl_unboxedOnlyKernel<{}, &{}>(at::DispatchKey::XLATensorId)\n'
+          '.impl_unboxedOnlyKernel<{}, &{}>(at::DispatchKey::{})\n'
           '      .aliasAnalysis(c10::AliasAnalysisKind::FROM_SCHEMA))\n'.format(
-              fgen.aten_sig, fgen.funsig, override_fn, override_fn,
-              fgen.aten_sig))
+              fgen.aten_sig, fgen.funsig, override_fn, dispatch_key))
   return code + ';\n}\n', overridden
 
 
