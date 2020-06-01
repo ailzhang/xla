@@ -96,6 +96,7 @@ DISABLED_TORCH_TESTS_ANY = {
         'test_resize_all_dtypes_and_devices',  # uses half
         'test_pinverse',  # lowering
         'test_norm',
+        'test_minmax_illegal_dtype',  # Checking runtime error
         'test_multinomial',
         'test_multinomial_alias',
         'test_masked_select',  # uses half
